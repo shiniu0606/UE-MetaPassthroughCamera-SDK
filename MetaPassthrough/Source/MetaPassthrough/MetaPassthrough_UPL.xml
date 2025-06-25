@@ -1,0 +1,578 @@
+<root xmlns:android="http://schemas.android.com/apk/res/android">
+    <plugins>
+        <plugin name="MetaPassthrough" enabled="true">
+            <androidLibrary>
+                <!-- AAR依赖已移除 -->
+            </androidLibrary>
+        </plugin>
+    </plugins>
+    <!-- 1. Gradle 配置 (Kotlin支持) -->
+    <buildscriptGradleAdditions>
+        <insert>
+            dependencies { classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:1.8.0" }
+        </insert>
+    </buildscriptGradleAdditions>
+
+    <!-- 2. AAR复制配置已移除 -->
+
+	<buildGradleAdditions>
+		<insert>
+apply plugin: 'kotlin-android'
+dependencies {
+    implementation "org.jetbrains.kotlin:kotlin-stdlib:1.8.0"
+    // AAR依赖已移除: implementation files('src/main/libs/android-platform-sdk-72.aar')
+}
+		</insert>
+	</buildGradleAdditions>
+
+    <!-- 3. AndroidManifest配置 - 只保留必要的配置 -->
+    <androidManifestUpdates>
+        <!-- 权限 - 保留必要的权限 -->
+        <addPermission android:name="android.permission.CAMERA" />
+        <addPermission android:name="horizonos.permission.HEADSET_CAMERA" />
+        
+        <!-- 移除可能重复的硬件特性配置 -->
+        <!-- 项目中可能已经配置了这些特性，避免重复 -->
+    </androidManifestUpdates>
+
+    <!-- 4. 导入必要的包 -->
+    <gameActivityImportAdditions>
+        <insert>
+import android.view.Surface;
+import android.util.Log;
+import android.graphics.ImageFormat;
+import android.media.Image;
+import java.nio.ByteBuffer;
+        </insert>
+    </gameActivityImportAdditions>
+
+    <!-- 5. 在GameActivity中添加摄像头管理器 -->
+    <gameActivityClassAdditions>
+        <insert>
+    // 摄像头相关的原生方法声明
+    public static native void onYuvFrame(
+        byte[] y, byte[] u, byte[] v,
+        int width, int height,
+        int yRowStride, int uRowStride, int vRowStride,
+        int uPixelStride, int vPixelStride
+    );
+    
+    // 相机拍照相关的原生方法声明
+    public static native void onPhotoCapture(byte[] jpegData, int width, int height, boolean success);
+    
+    private UE5CameraManager cameraManager;
+    private Surface previewSurface;
+    
+    // 提供给UE5调用的摄像头控制方法
+    public void startCamera() {
+        if (cameraManager != null) {
+            cameraManager.startCamera(previewSurface);
+        }
+    }
+    
+    public void stopCamera() {
+        if (cameraManager != null) {
+            cameraManager.stopCamera();
+        }
+    }
+    
+    public void setPreviewSurface(Surface surface) {
+        this.previewSurface = surface;
+    }
+    
+    // 提供给UE5调用的拍照方法
+    public void takePhoto() {
+        if (cameraManager != null) {
+            cameraManager.takePhoto();
+        }
+    }
+    
+    // 检查相机权限
+    public boolean checkCameraPermissions() {
+        return checkSelfPermission(android.Manifest.permission.CAMERA) == 
+               android.content.pm.PackageManager.PERMISSION_GRANTED &amp;&amp;
+               checkSelfPermission("horizonos.permission.HEADSET_CAMERA") == 
+               android.content.pm.PackageManager.PERMISSION_GRANTED;
+    }
+        </insert>
+    </gameActivityClassAdditions>
+
+    <!-- 6. 生命周期管理 -->
+    <gameActivityOnCreateAdditions>
+        <insert>
+        cameraManager = new UE5CameraManager(this);
+        </insert>
+    </gameActivityOnCreateAdditions>
+
+    <gameActivityOnResumeAdditions>
+        <insert>
+        if (cameraManager != null) {
+            cameraManager.onResume();
+        }
+        </insert>
+    </gameActivityOnResumeAdditions>
+
+    <gameActivityOnPauseAdditions>
+        <insert>
+        if (cameraManager != null) {
+            cameraManager.onPause();
+        }
+        </insert>
+    </gameActivityOnPauseAdditions>
+
+    <gameActivityOnStopAdditions>
+        <insert>
+        if (cameraManager != null) {
+            cameraManager.onStop();
+        }
+        </insert>
+    </gameActivityOnStopAdditions>
+
+    <!-- 7. 内嵌摄像头管理类 - 包含Meta特定逻辑 -->
+    <gameActivityClassAdditions>
+        <insert>
+    // Meta Quest 特定的摄像头常量
+    private static final String KEY_CAMERA_POSITION = "com.meta.extra_metadata.position";
+    private static final String KEY_CAMERA_SOURCE = "com.meta.extra_metadata.camera_source";
+    private static final int CAMERA_SOURCE_PASSTHROUGH = 0;
+    private static final int POSITION_RIGHT = 1;
+    
+    // 内嵌的摄像头管理类
+    private static class UE5CameraManager {
+        private static final String TAG = "UE5CameraManager";
+        private static final int IMAGE_BUFFER_SIZE = 3;
+        
+        private android.app.Activity activity;
+        private android.hardware.camera2.CameraManager cameraManager;
+        private android.hardware.camera2.CameraDevice camera;
+        private android.hardware.camera2.CameraCaptureSession cameraSession;
+        private android.media.ImageReader imageReader;
+        private android.os.Handler backgroundHandler;
+        private android.os.HandlerThread backgroundThread;
+        private String selectedCameraId;
+        private boolean isCameraActive = false;
+        private Surface previewSurface;
+        
+        // 拍照相关的变量
+        private android.media.ImageReader photoReader;
+        private boolean isPhotoCapturing = false;
+        
+        public UE5CameraManager(android.app.Activity activity) {
+            this.activity = activity;
+            this.cameraManager = (android.hardware.camera2.CameraManager) 
+                activity.getSystemService(android.content.Context.CAMERA_SERVICE);
+            startBackgroundThread();
+            initCamera();
+        }
+        
+        private void startBackgroundThread() {
+            backgroundThread = new android.os.HandlerThread("CameraBackground");
+            backgroundThread.start();
+            backgroundHandler = new android.os.Handler(backgroundThread.getLooper());
+        }
+        
+        private void stopBackgroundThread() {
+            if (backgroundThread != null) {
+                backgroundThread.quitSafely();
+                try {
+                    backgroundThread.join();
+                    backgroundThread = null;
+                    backgroundHandler = null;
+                } catch (InterruptedException e) {
+                    Log.debug(TAG + " Background thread interrupted: " + e.getMessage());
+                }
+            }
+        }
+        
+        private void initCamera() {
+            try {
+                // 查找Meta Passthrough摄像头
+                for (String cameraId : cameraManager.getCameraIdList()) {
+                    android.hardware.camera2.CameraCharacteristics characteristics = 
+                        cameraManager.getCameraCharacteristics(cameraId);
+                    
+                    // 使用Meta特定的Key检查摄像头类型
+                    android.hardware.camera2.CameraCharacteristics.Key&lt;java.lang.Integer&gt; sourceKey = 
+                        new android.hardware.camera2.CameraCharacteristics.Key&lt;&gt;(KEY_CAMERA_SOURCE, Integer.class);
+                    android.hardware.camera2.CameraCharacteristics.Key&lt;java.lang.Integer&gt; positionKey = 
+                        new android.hardware.camera2.CameraCharacteristics.Key&lt;&gt;(KEY_CAMERA_POSITION, Integer.class);
+                    
+                    Integer cameraSource = characteristics.get(sourceKey);
+                    Integer cameraPosition = characteristics.get(positionKey);
+                    
+                    // 查找右眼Passthrough摄像头
+                    if (cameraSource != null &amp;&amp; cameraSource == CAMERA_SOURCE_PASSTHROUGH &amp;&amp;
+                        cameraPosition != null &amp;&amp; cameraPosition == POSITION_RIGHT) {
+                        selectedCameraId = cameraId;
+                        Log.debug(TAG + " Found Passthrough camera: " + cameraId);
+                        break;
+                    }
+                }
+                
+                // 如果没找到Passthrough摄像头，使用第一个可用摄像头
+                if (selectedCameraId == null &amp;&amp; cameraManager.getCameraIdList().length &gt; 0) {
+                    selectedCameraId = cameraManager.getCameraIdList()[0];
+                    Log.debug(TAG + " Passthrough camera not found, using default: " + selectedCameraId);
+                }
+                
+            } catch (Exception e) {
+                Log.debug(TAG + " Error initializing camera: " + e.getMessage());
+            }
+        }
+        
+        public void startCamera(Surface surface) {
+            if (selectedCameraId == null || isCameraActive) return;
+            
+            this.previewSurface = surface;
+            
+            try {
+                // 检查权限
+                if (activity.checkSelfPermission(android.Manifest.permission.CAMERA) != 
+                    android.content.pm.PackageManager.PERMISSION_GRANTED ||
+                    activity.checkSelfPermission("horizonos.permission.HEADSET_CAMERA") != 
+                    android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                    Log.debug(TAG + " Camera permissions not granted");
+                    return;
+                }
+                
+                // 设置ImageReader
+                android.hardware.camera2.CameraCharacteristics characteristics = 
+                    cameraManager.getCameraCharacteristics(selectedCameraId);
+                android.hardware.camera2.params.StreamConfigurationMap configMap = characteristics.get(
+                    android.hardware.camera2.CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+                
+                if (configMap == null) {
+                    Log.debug(TAG + " StreamConfigurationMap is null");
+                    return;
+                }
+                
+                android.util.Size[] sizes = configMap.getOutputSizes(android.graphics.ImageFormat.YUV_420_888);
+                if (sizes == null || sizes.length == 0) {
+                    Log.debug(TAG + " No YUV output sizes available");
+                    return;
+                }
+                
+                android.util.Size previewSize = sizes[0]; // 选择第一个可用尺寸
+                Log.debug(TAG + " Selected camera resolution: " + previewSize.getWidth() + "x" + previewSize.getHeight());
+                
+                imageReader = android.media.ImageReader.newInstance(
+                    previewSize.getWidth(), previewSize.getHeight(), 
+                    android.graphics.ImageFormat.YUV_420_888, IMAGE_BUFFER_SIZE);
+                
+                imageReader.setOnImageAvailableListener(new android.media.ImageReader.OnImageAvailableListener() {
+                    @Override
+                    public void onImageAvailable(android.media.ImageReader reader) {
+                        android.media.Image image = reader.acquireLatestImage();
+                        if (image != null) {
+                            processImage(image);
+                            image.close();
+                        }
+                    }
+                }, backgroundHandler);
+                
+                // 打开摄像头
+                cameraManager.openCamera(selectedCameraId, new android.hardware.camera2.CameraDevice.StateCallback() {
+                    @Override
+                    public void onOpened(android.hardware.camera2.CameraDevice cameraDevice) {
+                        camera = cameraDevice;
+                        createCameraSession();
+                        Log.debug(TAG + " Camera opened successfully");
+                    }
+                    
+                    @Override
+                    public void onDisconnected(android.hardware.camera2.CameraDevice cameraDevice) {
+                        cameraDevice.close();
+                        camera = null;
+                        isCameraActive = false;
+                        Log.debug(TAG + " Camera disconnected");
+                    }
+                    
+                    @Override
+                    public void onError(android.hardware.camera2.CameraDevice cameraDevice, int error) {
+                        cameraDevice.close();
+                        camera = null;
+                        isCameraActive = false;
+                        Log.debug(TAG + " Camera error: " + error);
+                    }
+                }, backgroundHandler);
+                
+            } catch (Exception e) {
+                Log.debug(TAG + " Error starting camera: " + e.getMessage());
+            }
+        }
+        
+        private void createCameraSession() {
+            try {
+                java.util.List&lt;Surface&gt; surfaces = new java.util.ArrayList&lt;&gt;();
+                surfaces.add(imageReader.getSurface());
+                if (previewSurface != null) {
+                    surfaces.add(previewSurface);
+                }
+                
+                camera.createCaptureSession(surfaces, new android.hardware.camera2.CameraCaptureSession.StateCallback() {
+                    @Override
+                    public void onConfigured(android.hardware.camera2.CameraCaptureSession session) {
+                        cameraSession = session;
+                        startPreview();
+                        isCameraActive = true;
+                        Log.debug(TAG + " Camera session configured");
+                    }
+                    
+                    @Override
+                    public void onConfigureFailed(android.hardware.camera2.CameraCaptureSession session) {
+                        Log.debug(TAG + " Camera session configuration failed");
+                    }
+                }, backgroundHandler);
+                
+            } catch (Exception e) {
+                Log.debug(TAG + " Error creating camera session: " + e.getMessage());
+            }
+        }
+        
+        private void startPreview() {
+            try {
+                android.hardware.camera2.CaptureRequest.Builder builder = 
+                    camera.createCaptureRequest(android.hardware.camera2.CameraDevice.TEMPLATE_PREVIEW);
+                builder.addTarget(imageReader.getSurface());
+                if (previewSurface != null) {
+                    builder.addTarget(previewSurface);
+                }
+                
+                cameraSession.setRepeatingRequest(builder.build(), null, backgroundHandler);
+                Log.debug(TAG + " Camera preview started");
+                
+            } catch (Exception e) {
+                Log.debug(TAG + " Error starting preview: " + e.getMessage());
+            }
+        }
+        
+        private void processImage(android.media.Image image) {
+            try {
+                android.media.Image.Plane[] planes = image.getPlanes();
+                
+                // 提取YUV数据
+                java.nio.ByteBuffer yBuffer = planes[0].getBuffer();
+                java.nio.ByteBuffer uBuffer = planes[1].getBuffer();
+                java.nio.ByteBuffer vBuffer = planes[2].getBuffer();
+                
+                byte[] yBytes = new byte[yBuffer.remaining()];
+                byte[] uBytes = new byte[uBuffer.remaining()];
+                byte[] vBytes = new byte[vBuffer.remaining()];
+                
+                yBuffer.get(yBytes);
+                uBuffer.get(uBytes);
+                vBuffer.get(vBytes);
+                
+                // 调用JNI方法传递数据到UE5
+                onYuvFrame(
+                    yBytes, uBytes, vBytes,
+                    image.getWidth(), image.getHeight(),
+                    planes[0].getRowStride(), planes[1].getRowStride(), planes[2].getRowStride(),
+                    planes[1].getPixelStride(), planes[2].getPixelStride()
+                );
+                
+            } catch (Exception e) {
+                Log.debug(TAG + " Error processing image: " + e.getMessage());
+            }
+
+        }
+        
+        public void stopCamera() {
+            isCameraActive = false;
+            
+            if (cameraSession != null) {
+                try {
+                    cameraSession.stopRepeating();
+                    cameraSession.close();
+                } catch (Exception e) {
+                    Log.debug(TAG + " Error stopping camera session: " + e.getMessage());
+                }
+                cameraSession = null;
+            }
+            
+            if (camera != null) {
+                camera.close();
+                camera = null;
+            }
+            
+            if (imageReader != null) {
+                imageReader.close();
+                imageReader = null;
+            }
+            
+            if (photoReader != null) {
+                photoReader.close();
+                photoReader = null;
+            }
+            
+            Log.debug(TAG + " Camera stopped");
+        }
+        
+        public void onResume() {
+            startBackgroundThread();
+        }
+        
+        public void onPause() {
+            stopCamera();
+        }
+        
+        public void onStop() {
+            stopCamera();
+            stopBackgroundThread();
+        }
+        
+        // 拍照功能
+        public void takePhoto() {
+            if (!isCameraActive || isPhotoCapturing || camera == null || selectedCameraId == null) {
+                Log.debug(TAG + " Camera not ready for photo capture");
+                ((GameActivity)activity).onPhotoCapture(null, 0, 0, false);
+                return;
+            }
+            
+            isPhotoCapturing = true;
+            Log.debug(TAG + " Starting photo capture");
+            
+            try {
+                // 获取摄像头特性
+                android.hardware.camera2.CameraCharacteristics characteristics = 
+                    cameraManager.getCameraCharacteristics(selectedCameraId);
+                android.hardware.camera2.params.StreamConfigurationMap configMap = characteristics.get(
+                    android.hardware.camera2.CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+                
+                if (configMap == null) {
+                    Log.debug(TAG + " StreamConfigurationMap is null for photo");
+                    isPhotoCapturing = false;
+                    ((GameActivity)activity).onPhotoCapture(null, 0, 0, false);
+                    return;
+                }
+                
+                // 获取JPEG输出尺寸
+                android.util.Size[] jpegSizes = configMap.getOutputSizes(android.graphics.ImageFormat.JPEG);
+                if (jpegSizes == null || jpegSizes.length == 0) {
+                    Log.debug(TAG + " No JPEG output sizes available");
+                    isPhotoCapturing = false;
+                    ((GameActivity)activity).onPhotoCapture(null, 0, 0, false);
+                    return;
+                }
+                
+                // 选择一个合适的JPEG尺寸
+                android.util.Size photoSize = jpegSizes[0];
+                for (android.util.Size size : jpegSizes) {
+                    if (size.getWidth() &lt;= 2048 &amp;&amp; size.getHeight() &lt;= 2048) {
+                        photoSize = size;
+                        break;
+                    }
+                }
+                
+                Log.debug(TAG + " Photo size: " + photoSize.getWidth() + "x" + photoSize.getHeight());
+                
+                // 创建用于拍照的ImageReader
+                photoReader = android.media.ImageReader.newInstance(
+                    photoSize.getWidth(), photoSize.getHeight(),
+                    android.graphics.ImageFormat.JPEG, 1);
+                
+                photoReader.setOnImageAvailableListener(new android.media.ImageReader.OnImageAvailableListener() {
+                    @Override
+                    public void onImageAvailable(android.media.ImageReader reader) {
+                        android.media.Image image = reader.acquireLatestImage();
+                        if (image != null) {
+                            processPhotoImage(image);
+                            image.close();
+                        }
+                    }
+                }, backgroundHandler);
+                
+                // 创建拍照会话
+                java.util.List&lt;Surface&gt; photoSurfaces = new java.util.ArrayList&lt;&gt;();
+                photoSurfaces.add(photoReader.getSurface());
+                
+                camera.createCaptureSession(photoSurfaces, new android.hardware.camera2.CameraCaptureSession.StateCallback() {
+                    @Override
+                    public void onConfigured(android.hardware.camera2.CameraCaptureSession session) {
+                        captureStillPhoto(session);
+                    }
+                    
+                    @Override
+                    public void onConfigureFailed(android.hardware.camera2.CameraCaptureSession session) {
+                        Log.debug(TAG + " Photo capture session configuration failed");
+                        isPhotoCapturing = false;
+                        ((GameActivity)activity).onPhotoCapture(null, 0, 0, false);
+                    }
+                }, backgroundHandler);
+                
+            } catch (Exception e) {
+                Log.debug(TAG + " Error setting up photo capture: " + e.getMessage());
+                isPhotoCapturing = false;
+                ((GameActivity)activity).onPhotoCapture(null, 0, 0, false);
+            }
+        }
+        
+        private void captureStillPhoto(android.hardware.camera2.CameraCaptureSession session) {
+            try {
+                android.hardware.camera2.CaptureRequest.Builder builder = 
+                    camera.createCaptureRequest(android.hardware.camera2.CameraDevice.TEMPLATE_STILL_CAPTURE);
+                builder.addTarget(photoReader.getSurface());
+                
+                // 设置自动对焦和自动曝光
+                builder.set(android.hardware.camera2.CaptureRequest.CONTROL_AF_MODE,
+                    android.hardware.camera2.CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
+                builder.set(android.hardware.camera2.CaptureRequest.CONTROL_AE_MODE,
+                    android.hardware.camera2.CaptureRequest.CONTROL_AE_MODE_ON);
+                builder.set(android.hardware.camera2.CaptureRequest.JPEG_QUALITY, (byte) 95);
+                
+                session.capture(builder.build(), new android.hardware.camera2.CameraCaptureSession.CaptureCallback() {
+                    @Override
+                    public void onCaptureCompleted(android.hardware.camera2.CameraCaptureSession session,
+                        android.hardware.camera2.CaptureRequest request, 
+                        android.hardware.camera2.TotalCaptureResult result) {
+                        Log.debug(TAG + " Photo capture completed");
+                        // 图片处理在ImageReader回调中进行
+                    }
+                    
+                    @Override
+                    public void onCaptureFailed(android.hardware.camera2.CameraCaptureSession session,
+                        android.hardware.camera2.CaptureRequest request, 
+                        android.hardware.camera2.CaptureFailure failure) {
+                        Log.debug(TAG + " Photo capture failed");
+                        isPhotoCapturing = false;
+                        ((GameActivity)activity).onPhotoCapture(null, 0, 0, false);
+                        session.close();
+                    }
+                }, backgroundHandler);
+                
+            } catch (Exception e) {
+                Log.debug(TAG + " Error capturing still photo: " + e.getMessage());
+                isPhotoCapturing = false;
+                ((GameActivity)activity).onPhotoCapture(null, 0, 0, false);
+            }
+        }
+        
+        private void processPhotoImage(android.media.Image image) {
+            try {
+                java.nio.ByteBuffer buffer = image.getPlanes()[0].getBuffer();
+                byte[] jpegData = new byte[buffer.remaining()];
+                buffer.get(jpegData);
+                
+                Log.debug(TAG + " Photo captured: " + image.getWidth() + "x" + image.getHeight() + ", size: " + jpegData.length + " bytes");
+                
+                // 回调到UE5
+                ((GameActivity)activity).onPhotoCapture(jpegData, image.getWidth(), image.getHeight(), true);
+                
+            } catch (Exception e) {
+                Log.debug(TAG + " Error processing photo image: " + e.getMessage());
+                ((GameActivity)activity).onPhotoCapture(null, 0, 0, false);
+            } finally {
+                isPhotoCapturing = false;
+                // 关闭拍照会话，恢复预览会话
+                if (photoReader != null) {
+                    photoReader.close();
+                    photoReader = null;
+                }
+                // 重新创建预览会话
+                createCameraSession();
+            }
+        }
+    }
+        </insert>
+    </gameActivityClassAdditions>
+</root>
